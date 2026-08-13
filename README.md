@@ -4,7 +4,7 @@ Controle de receitas e despesas, com meta de investimento, lançamentos recorren
 
 ## Acessar
 
-Disponível online via GitHub Pages.
+Disponível online: https://patriota03.github.io/dashboard-financeiro/
 
 ## Funcionalidades
 
