@@ -168,6 +168,7 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
 .sync-badge.busy { color: var(--amber); border-color: rgba(245,158,11,.45); background: rgba(245,158,11,.08); }
 .sync-badge.busy .dot { animation: syncPulse 1s infinite; }
 @keyframes syncPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.version-tag { font-size: 10px; color: var(--muted); opacity: .65; }
 
 /* Layout */
 .forms-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
@@ -354,6 +355,7 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
         <button id="importBtn" class="btn btn-ghost" title="Importar dados">&#128194; Importar</button>
         <button id="syncBtn" class="btn btn-ghost" title="Sincronizar com a nuvem">&#9729; Sincronizar</button>
         <span class="sync-badge" id="syncBadge" hidden><span class="dot"></span><span id="syncBadgeText">Sincronizado</span></span>
+        <span class="version-tag" id="versionTag" title="Versão do aplicativo">v1.8</span>
         <button id="sampleBtn" class="btn btn-ghost" title="Adicionar dados de exemplo">Exemplo</button>
         <button id="clearBtn" class="btn btn-ghost danger" title="Apagar todos os dados">&#128465;</button>
       </div>
@@ -582,6 +584,7 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
         <button type="submit" class="btn btn-primary btn-block">Salvar e sincronizar</button>
         <button type="button" class="btn btn-block" id="syncNowBtn">Sincronizar agora</button>
         <div class="sync-status" id="syncStatus"></div>
+        <div class="sync-status" id="syncCounts" style="font-size:12px;margin-top:6px"></div>
       </form>
     </div>
   </div>
@@ -637,6 +640,7 @@ let syncPollTimer = null;
 let pendingTombstones = {};
 let needsPush = false;
 let pushing = false;
+let lastCloudCount = 0;
 
 const fmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
@@ -1878,6 +1882,7 @@ function buildSyncPayload() {
 
 function applyRemote(data) {
   if (!data || typeof data !== 'object') return false;
+  lastCloudCount = Array.isArray(data.transactions) ? data.transactions.length : 0;
   let changed = false;
   const mergeBy = (list, remote) => {
     const map = new Map(list.map((x) => [x.id, x]));
@@ -2005,6 +2010,11 @@ function setSyncStatus(msg, type) {
   if (el) {
     el.textContent = msg || '';
     el.className = 'sync-status' + (type ? ' ' + type : '');
+  }
+  const counts = $('syncCounts');
+  if (counts) {
+    counts.textContent =
+      'No aparelho: ' + transactions.length + ' lançamento(s) · Na nuvem: ' + lastCloudCount + ' lançamento(s)';
   }
   const badge = $('syncBadge');
   const text = $('syncBadgeText');
