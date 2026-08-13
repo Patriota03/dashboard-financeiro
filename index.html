@@ -558,8 +558,8 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
         <h2>&#9729; Sincroniza&ccedil;&atilde;o com a nuvem</h2>
         <p class="sync-help">
           Os dados ficam num reposit&oacute;rio <b>privado</b> do GitHub e s&atilde;o sincronizados
-          automaticamente entre os seus aparelhos. Cole o token de acesso criado nas
-          configura&ccedil;&otilde;es do GitHub.
+          automaticamente: ao abrir o app, a cada 30 segundos, ao voltar para a aba e quando a
+          internet reconectar. Cole o token de acesso criado nas configura&ccedil;&otilde;es do GitHub.
         </p>
         <div class="field">
           <label for="syncTokenInput">Token de acesso (fine-grained PAT)</label>
@@ -601,7 +601,10 @@ let pendingAttachment = null;
 let pendingRecurringAttachment = null;
 let syncToken = localStorage.getItem(SYNC_TOKEN_KEY) || '';
 let pushTimer = null;
+let syncPollTimer = null;
 let pendingTombstones = {};
+let needsPush = false;
+let pushing = false;
 
 const fmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
@@ -1615,14 +1618,20 @@ function buildSyncPayload() {
 }
 
 function applyRemote(data) {
-  if (!data || typeof data !== 'object') return;
+  if (!data || typeof data !== 'object') return false;
+  let changed = false;
   const mergeBy = (list, remote) => {
     const map = new Map(list.map((x) => [x.id, x]));
     (remote || []).forEach((x) => {
       if (!x || !x.id) return;
       const cur = map.get(x.id);
-      if (!cur) map.set(x.id, x);
-      else if ((x._u || 0) > (cur._u || 0)) map.set(x.id, x);
+      if (!cur) {
+        map.set(x.id, x);
+        changed = true;
+      } else if ((x._u || 0) > (cur._u || 0)) {
+        map.set(x.id, x);
+        changed = true;
+      }
     });
     return [...map.values()];
   };
@@ -1636,12 +1645,17 @@ function applyRemote(data) {
       startDate: data.goal.startDate || currentMonthKey(),
       _u: data.goal._u,
     };
+    changed = true;
   }
 
   const toms = loadTombstones();
   if (data.deleted) {
     Object.entries(data.deleted).forEach(([id, ts]) => {
-      toms[id] = Math.max(toms[id] || 0, ts || 0);
+      const val = ts || 0;
+      if (val > (toms[id] || 0)) {
+        toms[id] = val;
+        changed = true;
+      }
     });
   }
   pruneTombstones(toms);
@@ -1652,10 +1666,18 @@ function applyRemote(data) {
       const dts = toms[x.id];
       return !dts || !(dts >= (x._u || 0));
     });
+  const tBefore = transactions.length;
   transactions = cut(transactions);
+  if (transactions.length !== tBefore) changed = true;
+  const rBefore = recurrings.length;
   recurrings = cut(recurrings);
-  save();
-  saveRecurrings();
+  if (recurrings.length !== rBefore) changed = true;
+
+  if (changed) {
+    save();
+    saveRecurrings();
+  }
+  return changed;
 }
 
 async function syncPull() {
@@ -1667,43 +1689,50 @@ async function syncPull() {
   } catch {
     return false;
   }
-  applyRemote(data);
-  return true;
+  return applyRemote(data);
 }
 
 async function syncPush() {
   if (!syncToken) return;
-  const url = `${SYNC.api}/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.file}`;
-  const existing = await syncGetFile().catch(() => null);
-  const payload = (sha) =>
-    JSON.stringify({
-      message: 'sync ' + new Date().toISOString(),
-      content: encodeB64(JSON.stringify(buildSyncPayload())),
-      ...(sha ? { sha } : {}),
-    });
+  if (pushing) return;
+  pushing = true;
   try {
-    await syncFetch(url, {
-      method: 'PUT',
-      headers: syncHeaders(),
-      body: payload(existing && existing.sha),
-    });
-  } catch (err) {
-    if (/409|422/.test(err.message || '')) {
-      await syncPull();
-      const existing2 = await syncGetFile();
+    const url = `${SYNC.api}/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.file}`;
+    const existing = await syncGetFile().catch(() => null);
+    const payload = (sha) =>
+      JSON.stringify({
+        message: 'sync ' + new Date().toISOString(),
+        content: encodeB64(JSON.stringify(buildSyncPayload())),
+        ...(sha ? { sha } : {}),
+      });
+    try {
       await syncFetch(url, {
         method: 'PUT',
         headers: syncHeaders(),
-        body: payload(existing2 && existing2.sha),
+        body: payload(existing && existing.sha),
       });
-    } else {
-      throw err;
+    } catch (err) {
+      if (/409|422/.test(err.message || '')) {
+        await syncPull();
+        const existing2 = await syncGetFile();
+        await syncFetch(url, {
+          method: 'PUT',
+          headers: syncHeaders(),
+          body: payload(existing2 && existing2.sha),
+        });
+      } else {
+        throw err;
+      }
     }
+    needsPush = false;
+  } finally {
+    pushing = false;
   }
 }
 
 function schedulePush() {
   if (!syncToken) return;
+  needsPush = true;
   clearTimeout(pushTimer);
   pushTimer = setTimeout(() => {
     syncPush()
@@ -1719,11 +1748,31 @@ function setSyncStatus(msg, type) {
   el.className = 'sync-status' + (type ? ' ' + type : '');
 }
 
+async function autoSync() {
+  if (!syncToken) return;
+  try {
+    const changed = await syncPull();
+    if (changed) refresh();
+    if (needsPush) {
+      await syncPush();
+      setSyncStatus('Sincronizado ' + new Date().toLocaleTimeString('pt-BR'), 'ok');
+    }
+  } catch (err) {
+    setSyncStatus(err.message, 'err');
+  }
+}
+
+function startAutoSync() {
+  if (!syncToken || syncPollTimer) return;
+  syncPollTimer = setInterval(autoSync, 30000);
+}
+
 async function syncFromModal() {
   setSyncStatus('Sincronizando...');
   try {
-    await syncPull();
-    refresh();
+    const changed = await syncPull();
+    if (changed) refresh();
+    needsPush = true;
     await syncPush();
     setSyncStatus('Pronto! Dados sincronizados.', 'ok');
   } catch (err) {
@@ -1746,6 +1795,7 @@ function initSync() {
       }
       syncToken = token;
       localStorage.setItem(SYNC_TOKEN_KEY, token);
+      startAutoSync();
       syncFromModal();
     });
   }
@@ -1759,13 +1809,19 @@ function initSync() {
     });
   }
   if (syncToken) setSyncStatus('Nuvem ativa.', 'ok');
+  startAutoSync();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) autoSync();
+  });
+  window.addEventListener('focus', () => autoSync());
+  window.addEventListener('online', () => autoSync());
 }
 
 async function syncOnInit() {
   if (!syncToken) return;
   try {
-    await syncPull();
-    refresh();
+    const changed = await syncPull();
+    if (changed) refresh();
     await syncPush();
     setSyncStatus('Sincronizado.', 'ok');
   } catch (err) {
