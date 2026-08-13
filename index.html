@@ -575,7 +575,11 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
         <p class="sync-help">
           Os dados ficam num reposit&oacute;rio <b>privado</b> do GitHub e s&atilde;o sincronizados
           automaticamente: ao abrir o app, a cada 30 segundos, ao voltar para a aba e quando a
-          internet reconectar. Cole o token de acesso criado nas configura&ccedil;&otilde;es do GitHub.
+          internet reconectar. Cole o token de acesso criado nas configura&ccedil;&otilde;es do GitHub
+          (settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Fine-grained tokens).
+          <b>Importante:</b> em &quot;Repository access&quot; selecione <b>apenas</b> o reposit&oacute;rio
+          <b>dashboard-financeiro-dados</b>, e em &quot;Repository permissions&quot; d&ecirc;
+          <b>Contents: Read and write</b>.
         </p>
         <div class="field">
           <label for="syncTokenInput">Token de acesso (fine-grained PAT)</label>
@@ -1823,7 +1827,16 @@ function syncFetch(url, opts) {
     if (res.status === 401 || res.status === 403) {
       throw new Error('Token inválido ou sem permissão no repositório.');
     }
-    if (res.status === 404) return null;
+    if (res.status === 404) {
+      const method = (opts && opts.method) || 'GET';
+      if (method !== 'GET') {
+        throw new Error(
+          'O token não tem acesso ao repositório de dados (dashboard-financeiro-dados). ' +
+            'Crie outro token selecionando esse repositório e permissão Contents: Read and write.'
+        );
+      }
+      return null;
+    }
     if (!res.ok) throw new Error('Falha de comunicação com o GitHub (HTTP ' + res.status + ').');
     return res.json();
   });
