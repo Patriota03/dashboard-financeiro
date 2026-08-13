@@ -152,6 +152,10 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
   gap: 16px; padding: 28px; min-height: 0; width: min(420px, 100%);
 }
 .goal-form-body h2 { font-size: 18px; }
+.sync-help { font-size: 13px; color: var(--muted); }
+.sync-status { font-size: 13px; color: var(--muted); min-height: 18px; }
+.sync-status.ok { color: var(--green); }
+.sync-status.err { color: var(--red); }
 
 /* Layout */
 .forms-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
@@ -335,6 +339,7 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
           </select>
         </label>
         <button id="exportBtn" class="btn btn-ghost" title="Exportar CSV">&#11015; Exportar</button>
+        <button id="syncBtn" class="btn btn-ghost" title="Sincronizar com a nuvem">&#9729; Sincronizar</button>
         <button id="sampleBtn" class="btn btn-ghost" title="Adicionar dados de exemplo">Exemplo</button>
         <button id="clearBtn" class="btn btn-ghost danger" title="Apagar todos os dados">&#128465;</button>
       </div>
@@ -545,6 +550,28 @@ select:focus, input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgb
     </div>
   </div>
 
+  <div class="modal" id="syncModal">
+    <div class="modal-backdrop" id="syncModalBackdrop"></div>
+    <div class="modal-content">
+      <button class="modal-close" id="syncModalClose" title="Fechar">&times;</button>
+      <form class="modal-body goal-form-body" id="syncForm">
+        <h2>&#9729; Sincroniza&ccedil;&atilde;o com a nuvem</h2>
+        <p class="sync-help">
+          Os dados ficam num reposit&oacute;rio <b>privado</b> do GitHub e s&atilde;o sincronizados
+          automaticamente entre os seus aparelhos. Cole o token de acesso criado nas
+          configura&ccedil;&otilde;es do GitHub.
+        </p>
+        <div class="field">
+          <label for="syncTokenInput">Token de acesso (fine-grained PAT)</label>
+          <input type="password" id="syncTokenInput" autocomplete="off" placeholder="ghp_... / github_pat_..." />
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">Salvar e sincronizar</button>
+        <button type="button" class="btn btn-block" id="syncNowBtn">Sincronizar agora</button>
+        <div class="sync-status" id="syncStatus"></div>
+      </form>
+    </div>
+  </div>
+
   <script>
 const CATEGORIES = {
   receita: ['Salário', 'Freelance', 'Investimentos', 'Vendas', 'Outros'],
@@ -555,6 +582,14 @@ const STORAGE_KEY = 'finance-dashboard-transactions';
 const RECURRING_KEY = 'finance-dashboard-recurrings';
 const ATTACHMENT_KEY = 'finance-dashboard-attachments';
 const GOAL_KEY = 'finance-dashboard-goal';
+const SYNC = {
+  owner: 'Patriota03',
+  repo: 'dashboard-financeiro-dados',
+  file: 'dados.json',
+  api: 'https://api.github.com',
+};
+const SYNC_TOKEN_KEY = 'finance-dashboard-sync-token';
+const TOMBSTONE_KEY = 'finance-dashboard-tombstones';
 const colorPalette = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'];
 
 let transactions = load();
@@ -564,6 +599,9 @@ let goal = loadGoal();
 let goalChart = null;
 let pendingAttachment = null;
 let pendingRecurringAttachment = null;
+let syncToken = localStorage.getItem(SYNC_TOKEN_KEY) || '';
+let pushTimer = null;
+let pendingTombstones = {};
 
 const fmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
@@ -584,6 +622,7 @@ function save() {
   } catch {
     alert('Sem espaço para salvar (limite do navegador). Remova comprovantes grandes e tente novamente.');
   }
+  schedulePush();
 }
 
 function loadRecurrings() {
@@ -613,9 +652,9 @@ function loadGoal() {
     const g = JSON.parse(localStorage.getItem(GOAL_KEY)) || {};
     const target = Number(g.target) || 0;
     const aporte = Number(g.aporte) || Number(g.monthly) || 0;
-    return { target, aporte, startDate: g.startDate || currentMonthKey() };
+    return { target, aporte, startDate: g.startDate || currentMonthKey(), _u: Number(g._u) || 0 };
   } catch {
-    return { target: 0, aporte: 0, startDate: currentMonthKey() };
+    return { target: 0, aporte: 0, startDate: currentMonthKey(), _u: 0 };
   }
 }
 
@@ -625,6 +664,7 @@ function saveGoal() {
   } catch {
     alert('Não foi possível salvar a meta.');
   }
+  schedulePush();
 }
 
 function saveRecurrings() {
@@ -633,6 +673,7 @@ function saveRecurrings() {
   } catch {
     alert('Sem espaço para salvar os recorrentes. Remova comprovantes grandes e tente novamente.');
   }
+  schedulePush();
 }
 
 function getAttachment(item) {
@@ -869,6 +910,7 @@ function initForm() {
             type, description, amount, category, frequency, nextDate: date,
             total: total || null,
             generated: 0,
+            _u: Date.now(),
             ...att,
           });
           saveRecurrings();
@@ -885,6 +927,7 @@ function initForm() {
         transactions.push({
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
           type, description, amount, category, date,
+          _u: Date.now(),
           ...att,
         });
         save();
@@ -930,6 +973,7 @@ function processRecurrings() {
         category: r.category,
         date: r.nextDate,
         recurring: true,
+        _u: Date.now(),
         attachmentId: typeof r.attachmentId === 'string' ? r.attachmentId : null,
       });
       r.nextDate = advanceDate(r.nextDate, r.frequency);
@@ -1100,6 +1144,7 @@ function initAttachment() {
       hideSuggestions();
       closeModal();
       if ($('goalModal')) $('goalModal').style.display = 'none';
+      if ($('syncModal')) $('syncModal').style.display = 'none';
     }
   });
 }
@@ -1327,7 +1372,7 @@ function initGoalModal() {
       alert('Digite um aporte mensal válido (ex.: 1.000,00).');
       return;
     }
-    goal = { target, aporte, startDate: goal.startDate || currentMonthKey() };
+    goal = { target, aporte, startDate: goal.startDate || currentMonthKey(), _u: Date.now() };
     saveGoal();
     close();
     renderGoal();
@@ -1356,7 +1401,7 @@ function renderList() {
         <tr>
           <td>${dateLabel}</td>
           <td>${escapeHtml(t.description)} ${t.recurring ? '<span class="tag recorrente">recorrente</span>' : ''}${clip}</td>
-          <td><span class="tag">${t.category}</span></td>
+          <td><span class="tag">${escapeHtml(t.category)}</span></td>
           <td class="align-right ${cls}">${sign} ${fmt.format(t.amount)}</td>
           <td class="align-right"><button class="del" title="Excluir" data-id="${t.id}">\u2715</button></td>
         </tr>`;
@@ -1367,6 +1412,7 @@ function renderList() {
 
   tbody.querySelectorAll('.del').forEach((btn) =>
     btn.addEventListener('click', async () => {
+      addTombstone(btn.dataset.id);
       transactions = transactions.filter((t) => t.id !== btn.dataset.id);
       save();
       await cleanupAttachments();
@@ -1424,6 +1470,7 @@ function renderRecurringList() {
 
   listEl.querySelectorAll('.del').forEach((btn) =>
     btn.addEventListener('click', async () => {
+      addTombstone(btn.dataset.id);
       recurrings = recurrings.filter((r) => r.id !== btn.dataset.id);
       saveRecurrings();
       await cleanupAttachments();
@@ -1482,6 +1529,7 @@ function addSampleData() {
       description: s.description,
       amount: s.amount,
       category: s.category,
+      _u: Date.now(),
       date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
     });
   });
@@ -1493,6 +1541,236 @@ function escapeHtml(str) {
   return str.replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+/* ----- Sincronização com a nuvem (GitHub API) ----- */
+function syncHeaders() {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: 'Bearer ' + syncToken,
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+}
+
+function syncFetch(url, opts) {
+  return fetch(url, opts).then((res) => {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Token inválido ou sem permissão no repositório.');
+    }
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error('Falha de comunicação com o GitHub (HTTP ' + res.status + ').');
+    return res.json();
+  });
+}
+
+function syncGetFile() {
+  return syncFetch(`${SYNC.api}/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.file}`, {
+    headers: syncHeaders(),
+  });
+}
+
+function encodeB64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+function decodeB64(str) {
+  return decodeURIComponent(escape(atob(str)));
+}
+
+function loadTombstones() {
+  try {
+    return JSON.parse(localStorage.getItem(TOMBSTONE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+function saveTombstones(ts) {
+  try {
+    localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(ts));
+  } catch {}
+}
+function addTombstone(id) {
+  const ts = Date.now();
+  pendingTombstones[id] = ts;
+  const all = loadTombstones();
+  all[id] = ts;
+  saveTombstones(all);
+}
+function pruneTombstones(ts) {
+  const cutoff = Date.now() - 180 * 24 * 60 * 60 * 1000;
+  Object.keys(ts).forEach((k) => {
+    if (ts[k] < cutoff) delete ts[k];
+  });
+}
+
+function buildSyncPayload() {
+  const toms = { ...loadTombstones(), ...pendingTombstones };
+  pruneTombstones(toms);
+  return {
+    version: new Date().toISOString(),
+    transactions: transactions.map((t) => ({ ...t, _u: t._u || 0 })),
+    recurrings: recurrings.map((r) => ({ ...r, _u: r._u || 0 })),
+    goal: { ...goal, _u: goal._u || 0 },
+    deleted: toms,
+  };
+}
+
+function applyRemote(data) {
+  if (!data || typeof data !== 'object') return;
+  const mergeBy = (list, remote) => {
+    const map = new Map(list.map((x) => [x.id, x]));
+    (remote || []).forEach((x) => {
+      if (!x || !x.id) return;
+      const cur = map.get(x.id);
+      if (!cur) map.set(x.id, x);
+      else if ((x._u || 0) > (cur._u || 0)) map.set(x.id, x);
+    });
+    return [...map.values()];
+  };
+  transactions = mergeBy(transactions, data.transactions);
+  recurrings = mergeBy(recurrings, data.recurrings);
+
+  if (data.goal && (data.goal._u || 0) > (goal._u || 0)) {
+    goal = {
+      target: Number(data.goal.target) || 0,
+      aporte: Number(data.goal.aporte) || 0,
+      startDate: data.goal.startDate || currentMonthKey(),
+      _u: data.goal._u,
+    };
+  }
+
+  const toms = loadTombstones();
+  if (data.deleted) {
+    Object.entries(data.deleted).forEach(([id, ts]) => {
+      toms[id] = Math.max(toms[id] || 0, ts || 0);
+    });
+  }
+  pruneTombstones(toms);
+  saveTombstones(toms);
+
+  const cut = (list) =>
+    list.filter((x) => {
+      const dts = toms[x.id];
+      return !dts || !(dts >= (x._u || 0));
+    });
+  transactions = cut(transactions);
+  recurrings = cut(recurrings);
+  save();
+  saveRecurrings();
+}
+
+async function syncPull() {
+  const file = await syncGetFile();
+  if (!file || !file.content) return false;
+  let data;
+  try {
+    data = JSON.parse(decodeB64(file.content));
+  } catch {
+    return false;
+  }
+  applyRemote(data);
+  return true;
+}
+
+async function syncPush() {
+  if (!syncToken) return;
+  const url = `${SYNC.api}/repos/${SYNC.owner}/${SYNC.repo}/contents/${SYNC.file}`;
+  const existing = await syncGetFile().catch(() => null);
+  const payload = (sha) =>
+    JSON.stringify({
+      message: 'sync ' + new Date().toISOString(),
+      content: encodeB64(JSON.stringify(buildSyncPayload())),
+      ...(sha ? { sha } : {}),
+    });
+  try {
+    await syncFetch(url, {
+      method: 'PUT',
+      headers: syncHeaders(),
+      body: payload(existing && existing.sha),
+    });
+  } catch (err) {
+    if (/409|422/.test(err.message || '')) {
+      await syncPull();
+      const existing2 = await syncGetFile();
+      await syncFetch(url, {
+        method: 'PUT',
+        headers: syncHeaders(),
+        body: payload(existing2 && existing2.sha),
+      });
+    } else {
+      throw err;
+    }
+  }
+}
+
+function schedulePush() {
+  if (!syncToken) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    syncPush()
+      .then(() => setSyncStatus('Sincronizado ' + new Date().toLocaleTimeString('pt-BR'), 'ok'))
+      .catch((err) => setSyncStatus(err.message, 'err'));
+  }, 1500);
+}
+
+function setSyncStatus(msg, type) {
+  const el = $('syncStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'sync-status' + (type ? ' ' + type : '');
+}
+
+async function syncFromModal() {
+  setSyncStatus('Sincronizando...');
+  try {
+    await syncPull();
+    refresh();
+    await syncPush();
+    setSyncStatus('Pronto! Dados sincronizados.', 'ok');
+  } catch (err) {
+    setSyncStatus(err.message, 'err');
+  }
+}
+
+function initSync() {
+  if ($('syncBtn')) $('syncBtn').addEventListener('click', () => ($('syncModal').style.display = 'flex'));
+  if ($('syncModalClose')) $('syncModalClose').addEventListener('click', () => ($('syncModal').style.display = 'none'));
+  if ($('syncModalBackdrop')) $('syncModalBackdrop').addEventListener('click', () => ($('syncModal').style.display = 'none'));
+  if ($('syncTokenInput')) $('syncTokenInput').value = syncToken;
+  if ($('syncForm')) {
+    $('syncForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const token = $('syncTokenInput').value.trim();
+      if (!token) {
+        setSyncStatus('Informe o token de acesso.', 'err');
+        return;
+      }
+      syncToken = token;
+      localStorage.setItem(SYNC_TOKEN_KEY, token);
+      syncFromModal();
+    });
+  }
+  if ($('syncNowBtn')) {
+    $('syncNowBtn').addEventListener('click', () => {
+      if (!syncToken) {
+        setSyncStatus('Cole o token primeiro.', 'err');
+        return;
+      }
+      syncFromModal();
+    });
+  }
+  if (syncToken) setSyncStatus('Nuvem ativa.', 'ok');
+}
+
+async function syncOnInit() {
+  if (!syncToken) return;
+  try {
+    await syncPull();
+    refresh();
+    await syncPush();
+    setSyncStatus('Sincronizado.', 'ok');
+  } catch (err) {
+    setSyncStatus(err.message, 'err');
+  }
 }
 
 function refresh() {
@@ -1510,8 +1788,12 @@ if ($('exportBtn')) $('exportBtn').addEventListener('click', exportCsv);
 if ($('sampleBtn')) $('sampleBtn').addEventListener('click', addSampleData);
 $('clearBtn').addEventListener('click', async () => {
   if (confirm('Apagar todos os lançamentos?')) {
+    transactions.forEach((t) => addTombstone(t.id));
+    recurrings.forEach((r) => addTombstone(r.id));
     transactions = [];
+    recurrings = [];
     save();
+    saveRecurrings();
     attachments = {};
     if (dbOk) await dbClear().catch(() => {});
     refresh();
@@ -1525,8 +1807,10 @@ $('clearBtn').addEventListener('click', async () => {
     initAutocomplete();
     initAttachment();
     initGoalModal();
+    initSync();
     processRecurrings();
     refresh();
+    syncOnInit();
   } catch (err) {
     alert('Erro ao iniciar o dashboard: ' + (err && err.message ? err.message : err));
   }
