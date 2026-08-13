@@ -2091,7 +2091,7 @@ function initSync() {
       syncFromModal();
     });
   }
-  if (syncToken) setSyncStatus('Nuvem ativa.', 'ok');
+  if (syncToken) setSyncStatus('Sincronizando...', 'busy');
   else setSyncStatus('', 'off');
   startAutoSync();
   document.addEventListener('visibilitychange', () => {
@@ -2143,6 +2143,7 @@ $('clearBtn').addEventListener('click', async () => {
 });
 
 (async function initApp() {
+  let initErr = null;
   try {
     await migrateStorage();
     initForm();
@@ -2153,10 +2154,11 @@ $('clearBtn').addEventListener('click', async () => {
     initImport();
     processRecurrings();
     refresh();
-    syncOnInit();
   } catch (err) {
-    alert('Erro ao iniciar o dashboard: ' + (err && err.message ? err.message : err));
+    initErr = err;
   }
+  if (initErr) alert('Erro ao iniciar o dashboard: ' + (initErr && initErr.message ? initErr.message : initErr));
+  syncOnInit();
 })();
   </script>
 </body>
