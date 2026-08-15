@@ -1,0 +1,6 @@
+# Segredos - nunca versionar
+*TOKEN*.txt
+*token*.txt
+
+# Backups de dados (exportacoes) - nao subir em repositorio publico
+*.csv
